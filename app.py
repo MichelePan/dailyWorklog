@@ -8,31 +8,43 @@ from jira_client import fetch_worklogs_for_range
 st.set_page_config(page_title="Jira Worklog Dashboard", layout="wide")
 st.title("Jira Worklog Dashboard")
 
+# --- Secrets ---
 jira_domain = st.secrets["JIRA_DOMAIN"]
 email = st.secrets["JIRA_EMAIL"]
 api_token = st.secrets["JIRA_API_TOKEN"]
 
+# --- Sidebar ---
 st.sidebar.header("Filtri")
 
-date_from = st.sidebar.date_input("Dal", value=date.today().replace(day=1))
+default_from = date.today().replace(day=1)
+date_from = st.sidebar.date_input("Dal", value=default_from)
 date_to = st.sidebar.date_input("Al", value=date.today())
 
 if date_from > date_to:
-    st.sidebar.error("Intervallo date non valido: 'Dal' deve essere <= 'Al'")
+    st.sidebar.error("Intervallo non valido: 'Dal' deve essere <= 'Al'.")
     st.stop()
 
-# opzionale: JQL extra
+# opzionale: restringi per progetto o altro (consigliato per performance)
 jql_extra = st.sidebar.text_input("JQL extra (opzionale)", value="")
 
 refresh = st.sidebar.button("Aggiorna dati")
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_data(date_from, date_to, jql_extra):
-    rows = fetch_worklogs_for_range(jira_domain, email, api_token, date_from, date_to, jql_extra or None)
+def load_data(date_from: date, date_to: date, jql_extra: str):
+    rows = fetch_worklogs_for_range(
+        jira_domain=jira_domain,
+        email=email,
+        api_token=api_token,
+        date_from=date_from,
+        date_to=date_to,
+        jql_extra=jql_extra or None,
+    )
     df = pd.DataFrame(rows)
     if df.empty:
         return df
+
     df["Ore"] = pd.to_numeric(df["Ore"])
+    df["Data"] = pd.to_datetime(df["Data"]).dt.date  # garantisce tipo date
     return df
 
 if refresh:
@@ -45,9 +57,9 @@ if df.empty:
     st.info("Nessun worklog trovato nell’intervallo selezionato.")
     st.stop()
 
-# --- Filtri post-load: Utente + Tipo ---
-users = ["(tutti)"] + sorted(df["Utente"].unique().tolist())
-types = ["(tutti)"] + sorted(df["Tipo"].fillna("").unique().tolist())
+# --- Filtri post-load: Utente + Tipo (single select) ---
+users = ["(tutti)"] + sorted([u for u in df["Utente"].dropna().unique().tolist() if str(u).strip() != ""])
+types = ["(tutti)"] + sorted([t for t in df["Tipo"].dropna().unique().tolist() if str(t).strip() != ""])
 
 user_sel = st.sidebar.selectbox("Utente", users)
 type_sel = st.sidebar.selectbox("Tipo attività", types)
@@ -58,7 +70,10 @@ if user_sel != "(tutti)":
 if type_sel != "(tutti)":
     df_view = df_view[df_view["Tipo"] == type_sel]
 
-# KPI
+# Ordina per data/utente/task
+df_view = df_view.sort_values(["Data", "Utente", "TaskKey"])
+
+# --- KPI ---
 c1, c2, c3 = st.columns(3)
 c1.metric("Totale ore", f"{df_view['Ore'].sum():.2f}")
 c2.metric("N. worklog", f"{len(df_view)}")
@@ -70,14 +85,19 @@ left, right = st.columns([2, 1])
 
 with left:
     st.subheader("Dettaglio")
-    st.dataframe(df_view, use_container_width=True, hide_index=True)
 
-    csv_bytes = df_view.to_csv(index=False).encode("utf-8")
+    # Mostro Data come dd/mm/YYYY
+    df_show = df_view.copy()
+    df_show["Data"] = pd.to_datetime(df_show["Data"]).dt.strftime("%d/%m/%Y")
+
+    st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+    csv_bytes = df_show.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download CSV",
         data=csv_bytes,
         file_name=f"worklog_{date_from.isoformat()}_{date_to.isoformat()}.csv",
-        mime="text/csv"
+        mime="text/csv",
     )
 
 with right:
@@ -90,8 +110,8 @@ with right:
         .encode(
             x=alt.X("Ore:Q", title="Ore"),
             y=alt.Y("Utente:N", sort="-x", title=""),
-            tooltip=["Utente", "Ore"]
+            tooltip=["Utente", "Ore"],
         )
-        .properties(height=400)
+        .properties(height=420)
     )
     st.altair_chart(chart, use_container_width=True)
