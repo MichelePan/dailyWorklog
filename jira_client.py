@@ -89,4 +89,43 @@ def fetch_worklogs_for_range(
     auth = HTTPBasicAuth(email, api_token)
 
     # Selettore robusto: prendo issue che hanno worklog nel range.
-    jql = f'worklogDate >= "{_jira_date(date_from)}" AND worklogDate
+    jql = f'worklogDate >= "{_jira_date(date_from)}" AND worklogDate <= "{_jira_date(date_to)}"'
+    if jql_extra and jql_extra.strip():
+        jql = f"({jql}) AND ({jql_extra.strip()})"
+
+    issues = search_issues(base_url, auth, jql, fields=["summary", "issuetype"])
+
+    rows = []
+    for issue in issues:
+        key = issue.get("key", "")
+        fields = issue.get("fields", {}) or {}
+        summary = fields.get("summary", "") or ""
+        issuetype = (fields.get("issuetype") or {}).get("name", "") or ""
+
+        if not key:
+            continue
+
+        worklogs = get_issue_worklogs(base_url, auth, key)
+
+        for wl in worklogs:
+            # started: "2026-02-20T09:12:34.000+0000"
+            started_day = datetime.strptime(wl["started"][:10], "%Y-%m-%d").date()
+            if started_day < date_from or started_day > date_to:
+                continue
+
+            author = (wl.get("author") or {}).get("displayName", "")
+            seconds = wl.get("timeSpentSeconds", 0) or 0
+            hours = round(seconds / 3600, 2)
+
+            rows.append(
+                {
+                    "Data": started_day,   # teniamola come date vera, più comoda per ordinare/filtrare
+                    "Utente": author,
+                    "Tipo": issuetype,
+                    "TaskKey": key,
+                    "Summary": summary,
+                    "Ore": hours,
+                }
+            )
+
+    return rows
