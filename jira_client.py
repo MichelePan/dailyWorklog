@@ -13,10 +13,6 @@ def _jira_date(d: date) -> str:
 
 
 def search_issues(base_url: str, auth: HTTPBasicAuth, jql: str, fields=None, max_results=100):
-    """
-    Ritorna tutte le issue che matchano la JQL (paginando).
-    Usa POST /rest/api/3/search.
-    """
     if fields is None:
         fields = ["summary", "issuetype"]
 
@@ -25,16 +21,24 @@ def search_issues(base_url: str, auth: HTTPBasicAuth, jql: str, fields=None, max
     issues = []
 
     while True:
-        payload = {
+        params = {
             "jql": jql,
             "startAt": start_at,
             "maxResults": max_results,
-            "fields": fields,
+            "fields": ",".join(fields),
         }
-        r = requests.post(url, headers=HEADERS, json=payload, auth=auth, timeout=60)
-        r.raise_for_status()
-        data = r.json()
+        r = requests.get(url, headers=HEADERS, params=params, auth=auth, timeout=60)
 
+        if not r.ok:
+            try:
+                details = r.json()
+            except Exception:
+                details = r.text
+            raise RuntimeError(
+                f"Jira API error on /search | status={r.status_code} | jql={jql} | details={details}"
+            )
+
+        data = r.json()
         batch = data.get("issues", [])
         issues.extend(batch)
 
