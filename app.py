@@ -5,7 +5,7 @@ import altair as alt
 
 from jira_client import fetch_worklogs_for_day
 
-st.set_page_config(page_title="Jira Worklog Dashboard", layout="wide")
+st.set_page_config(page_title="Jira Daily Worklog Dashboard", layout="wide")
 
 st.title("Jira Worklog Dashboard")
 
