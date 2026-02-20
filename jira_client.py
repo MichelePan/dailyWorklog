@@ -66,7 +66,7 @@ def fetch_worklogs_for_day(jira_domain: str, email: str, api_token: str, day: da
     rows = []
 
     for wl in worklogs:
-        started = datetime.strptime(wl["started"][:10], "%Y-%m-%d").date()
+        started = datetime.strptime(wl["started"][:10], "%d-%m-%Y").date()
         if started != day:
             continue
 
@@ -83,7 +83,6 @@ def fetch_worklogs_for_day(jira_domain: str, email: str, api_token: str, day: da
 
         key, summary = issue_map[issue_id]
         rows.append({
-            "Data": started.strftime("%d/%m/%Y"),
             "Utente": author,
             "TaskKey": key,
             "Summary": summary,
