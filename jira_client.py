@@ -1,135 +1,93 @@
 import requests
 from requests.auth import HTTPBasicAuth
-from datetime import datetime, date
+from datetime import datetime, date, time
 
 HEADERS = {
     "Accept": "application/json",
-    "Content-Type": "application/json",
+    "Content-Type": "application/json"
 }
 
-
-def _jira_date(d: date) -> str:
-    return d.strftime("%Y-%m-%d")
-
-
-def search_issues(base_url: str, auth: HTTPBasicAuth, jql: str, fields=None, max_results=100):
-    if fields is None:
-        fields = ["summary", "issuetype"]
-
-    url = f"{base_url}/search"
-    start_at = 0
-    issues = []
+def get_all_worklog_ids_since(base_url: str, auth: HTTPBasicAuth, since_ms: int):
+    worklog_ids = []
+    url = f"{base_url}/worklog/updated"
+    params = {"since": since_ms}
 
     while True:
-        params = {
-            "jql": jql,
-            "startAt": start_at,
-            "maxResults": max_results,
-            "fields": ",".join(fields),
-        }
-        r = requests.get(url, headers=HEADERS, params=params, auth=auth, timeout=60)
-
-        if not r.ok:
-            try:
-                details = r.json()
-            except Exception:
-                details = r.text
-            raise RuntimeError(
-                f"Jira API error on /search | status={r.status_code} | jql={jql} | details={details}"
-            )
-
-        data = r.json()
-        batch = data.get("issues", [])
-        issues.extend(batch)
-
-        start_at += len(batch)
-        total = data.get("total", 0)
-        if not batch or start_at >= total:
-            break
-
-    return issues
-
-
-def get_issue_worklogs(base_url: str, auth: HTTPBasicAuth, issue_key: str):
-    """
-    Prende tutti i worklog di una issue (paginando).
-    GET /issue/{issueKey}/worklog
-    """
-    url = f"{base_url}/issue/{issue_key}/worklog"
-    start_at = 0
-    max_results = 100
-    out = []
-
-    while True:
-        params = {"startAt": start_at, "maxResults": max_results}
         r = requests.get(url, headers=HEADERS, params=params, auth=auth, timeout=60)
         r.raise_for_status()
         data = r.json()
 
-        wls = data.get("worklogs", [])
-        out.extend(wls)
+        values = data.get("values", [])
+        worklog_ids.extend([v["worklogId"] for v in values])
 
-        start_at += len(wls)
-        total = data.get("total", 0)
-        if not wls or start_at >= total:
+        # Jira: lastPage True/False (può variare), gestiamo robusto
+        if data.get("lastPage") is True:
             break
 
-    return out
+        until = data.get("until")
+        if not until:
+            break
+        params["since"] = until
 
+    return worklog_ids
 
-def fetch_worklogs_for_range(
-    jira_domain: str,
-    email: str,
-    api_token: str,
-    date_from: date,
-    date_to: date,
-    jql_extra: str | None = None,
-):
-    """
-    Estrae worklog nel range [date_from, date_to] inclusi.
-    Include IssueType (Bug/Task/Story/…).
-    """
+def get_worklogs_details(base_url: str, auth: HTTPBasicAuth, worklog_ids, chunk_size=1000):
+    all_worklogs = []
+    for i in range(0, len(worklog_ids), chunk_size):
+        chunk = worklog_ids[i:i + chunk_size]
+        url = f"{base_url}/worklog/list"
+        payload = {"ids": chunk}
+        r = requests.post(url, headers=HEADERS, json=payload, auth=auth, timeout=60)
+        r.raise_for_status()
+        all_worklogs.extend(r.json())
+    return all_worklogs
+
+def get_issue_key_and_summary(base_url: str, auth: HTTPBasicAuth, issue_id: str):
+    url = f"{base_url}/issue/{issue_id}"
+    r = requests.get(url, headers=HEADERS, auth=auth, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+    return data["key"], data["fields"]["summary"]
+
+def fetch_worklogs_for_day(jira_domain: str, email: str, api_token: str, day: date):
     base_url = f"https://{jira_domain}/rest/api/3"
     auth = HTTPBasicAuth(email, api_token)
 
-    # Selettore robusto: prendo issue che hanno worklog nel range.
-    jql = f'worklogDate >= "{_jira_date(date_from)}" AND worklogDate <= "{_jira_date(date_to)}"'
-    if jql_extra and jql_extra.strip():
-        jql = f"({jql}) AND ({jql_extra.strip()})"
+    since_datetime = datetime.combine(day, time.min)
+    since_ms = int(since_datetime.timestamp() * 1000)
 
-    issues = search_issues(base_url, auth, jql, fields=["summary", "issuetype"])
+    worklog_ids = get_all_worklog_ids_since(base_url, auth, since_ms)
+    if not worklog_ids:
+        return []
 
+    worklogs = get_worklogs_details(base_url, auth, worklog_ids)
+
+    issue_map = {}
     rows = []
-    for issue in issues:
-        key = issue.get("key", "")
-        fields = issue.get("fields", {}) or {}
-        summary = fields.get("summary", "") or ""
-        issuetype = (fields.get("issuetype") or {}).get("name", "") or ""
 
-        if not key:
+    for wl in worklogs:
+        started = datetime.strptime(wl["started"][:10], "%Y-%m-%d").date()
+        if started != day:
             continue
 
-        worklogs = get_issue_worklogs(base_url, auth, key)
+        author = wl["author"]["displayName"]
+        issue_id = wl["issueId"]
+        hours = round(wl["timeSpentSeconds"] / 3600, 2)
 
-        for wl in worklogs:
-            # started: "2026-02-20T09:12:34.000+0000"
-            started_day = datetime.strptime(wl["started"][:10], "%Y-%m-%d").date()
-            if started_day < date_from or started_day > date_to:
-                continue
+        if issue_id not in issue_map:
+            try:
+                key, summary = get_issue_key_and_summary(base_url, auth, issue_id)
+                issue_map[issue_id] = (key, summary)
+            except Exception:
+                issue_map[issue_id] = (f"UNKNOWN-{issue_id}", "")
 
-            author = (wl.get("author") or {}).get("displayName", "")
-            seconds = wl.get("timeSpentSeconds", 0) or 0
-            hours = round(seconds / 3600, 2)
-
-            rows.append(
-                {
-                    "Data": started_day,   # teniamola come date vera, più comoda per ordinare/filtrare
-                    "Utente": author,
-                    "Tipo": issuetype,
-                    "TaskKey": key,
-                    "Summary": summary,
-                    "Ore": hours,
-                }
-            )
+        key, summary = issue_map[issue_id]
+        rows.append({
+            "Data": started.strftime("%d/%m/%Y"),
+            "Utente": author,
+            "TaskKey": key,
+            "Summary": summary,
+            "Ore": hours
+        })
 
     return rows
